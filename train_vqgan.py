@@ -1,21 +1,22 @@
 import sys
-import importlib
+import yaml
 import os
-import wandb
 
 import jax
 import jax.numpy as jnp
 import optax
 import operator
 from flax import serialization
+from torchvision import transforms
+from datasets import load_dataset
+from dataset import HuggingFace
+from torch.utils.data import DataLoader
+import wandb
+from vqgan import VQGAN
+from discriminator import Discriminator
+from lpips import LPIPS
 
 import numpy as np
-
-
-def get_everything(config_path, args):
-    module_path = config_path.replace('/', '.').replace('.py', '')
-    module = importlib.import_module(module_path, package=None)
-    return module.everything(args)
 
 
 def save_checkpoint(path, state):
@@ -53,7 +54,8 @@ def sigmoid_cross_entropy_with_logits(logits, labels):
 def make_generator_update_fn(*, vqgan_apply_fn, vqgan_optimizer, disc_apply_fn, lpips_apply_fn, ema_decay, disc_start):
     def update_fn(vqgan_params, vqgan_opt_state, disc_params, lpips_params, images, ema_params, global_step):
         def loss_fn(params):
-            images_recon, quantized_latents, commitment_loss, embedding_loss, enc_indices = vqgan_apply_fn(params, images)
+            images_recon, quantized_latents, commitment_loss, embedding_loss, enc_indices = vqgan_apply_fn(params,
+                                                                                                           images)
 
             disc_factor = adopt_weight(global_step, disc_start)
             disc_fake = disc_apply_fn(disc_params, images_recon)
@@ -104,18 +106,78 @@ def make_disc_update_fn(*, apply_fn, optimizer, disc_start):
     return jax.pmap(update_fn, axis_name='batch', donate_argnums=())
 
 
-def main(config_path, args):
-    evy = get_everything(config_path, args)
+def main(config_path):
+    with open(config_path, 'r') as file:
+        try:
+            config = yaml.safe_load(file)
+        except yaml.YAMLError as exc:
+            print(exc)
+    print(config)
 
-    seed, train_loader = evy['seed'], evy['train_loader']
+    vqgan_config = config['model']
+    disc_config = config['discriminator']
+    lpips_config = config['lpips']
+    dataset_params = config['dataset_params']
+    wandb_config = config['wandb']
+
+    seed = vqgan_config['seed']
+
+    transform = transforms.Compose([
+        transforms.Resize((dataset_params['img_size'], dataset_params['img_size'])),
+        transforms.ToTensor(),  # Normalize [0, 1]
+        transforms.Lambda(lambda t: (t * 2) - 1),  # Scale [-1, 1]
+        transforms.Lambda(lambda x: x.permute(1, 2, 0)),  # Convert [C, H, W] to [H, W, C]
+    ])
+
+    train_dataset = HuggingFace(
+        dataset=load_dataset("flwrlabs/celeba", split='train'),
+        transform=transform,
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=dataset_params['batch_size'],
+        shuffle=True,
+        num_workers=dataset_params['num_workers'],
+        drop_last=True,
+    )
+
+    vqgan = VQGAN(**vqgan_config['params'])
+
+    disc = Discriminator(**disc_config['params'])
+
+    lpips = LPIPS(**lpips_config['params'])
+
+    vqgan_optimizer = optax.chain(
+        optax.adam(
+            learning_rate=vqgan_config['learning_rate'],
+            b1=vqgan_config['b1'],
+            b2=vqgan_config['b2'],
+        ))
+
+    disc_optimizer = optax.chain(
+        optax.adam(
+            learning_rate=disc_config['learning_rate'],
+            b1=vqgan_config['b1'],
+            b2=vqgan_config['b2'],
+        ))
+
+    epochs = vqgan_config['epochs']
+
+    run = wandb.init(
+        project=wandb_config['project'],
+        name=wandb_config['name'],
+        reinit=True,
+        config=config
+    )
+
+    checkpoint_path = vqgan_config['checkpoint_path']
+
     inputs = next(iter(train_loader))
-    model, disc, lpips = evy['vqgan'], evy['disc'], evy['lpips']
-    vqgan_optimizer, disc_optimizer, epochs = evy['vqgan_optimizer'], evy['disc_optimizer'], evy['epochs']
-    run, checkpoint_path, disc_start = evy['run'], evy['checkpoint_path'], evy['disc_start']
 
     key = jax.random.PRNGKey(seed)
-    vqgan_params = model.init(key, inputs)
-    disc_params = disc.init(key, inputs)
+    vqgan_params = vqgan.init(key, np.array(inputs))
+    disc_params = disc.init(key, np.array(inputs))
     lpips_params = lpips.init(key, jnp.ones((2, 128, 128, 3)), jnp.ones((2, 128, 128, 3)))
 
     vqgan_opt_state = vqgan_optimizer.init(vqgan_params)
@@ -128,15 +190,19 @@ def main(config_path, args):
     ema_params_repl = replicate(ema_params)
 
     generator_update_fn = make_generator_update_fn(
-        vqgan_apply_fn=model.apply,
+        vqgan_apply_fn=vqgan.apply,
         vqgan_optimizer=vqgan_optimizer,
         disc_apply_fn=disc.apply,
         lpips_apply_fn=lpips.apply,
-        ema_decay=0.9999,
-        disc_start=disc_start,
+        ema_decay=vqgan_config['ema_decay'],
+        disc_start=disc_config['disc_start'],
     )
 
-    disc_update_fn = make_disc_update_fn(apply_fn=disc.apply, optimizer=disc_optimizer, disc_start=disc_start)
+    disc_update_fn = make_disc_update_fn(
+        apply_fn=disc.apply,
+        optimizer=disc_optimizer,
+        disc_start=disc_config['disc_start']
+    )
 
     vqgan_params_repl = replicate(vqgan_params)
     vqgan_opt_state_repl = replicate(vqgan_opt_state)
@@ -270,4 +336,4 @@ def main(config_path, args):
 if __name__ == '__main__':
     if len(sys.argv) == 1:
         raise ValueError('you must provide config file')
-    main(sys.argv[1], sys.argv[2:])
+    main(sys.argv[1])
