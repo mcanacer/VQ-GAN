@@ -1,0 +1,39 @@
+dataset_params:
+  img_size: 128
+  batch_size: 64
+  num_workers: 4
+
+model:
+  learning_rate: 0.0001
+  b1: 0.0
+  b2: 0.99
+  target: vqgan.VQGAN
+  seed: 42
+  params:
+    embedding_dim: 256
+    num_embeddings: 1024
+    output_channels: 3
+    commitment_cost: 0.25
+    channel_multipliers: [1, 1, 2, 2, 4]
+  checkpoint_path: /content/drive/MyDrive/VQ-GAN/vqgan_c.pkl
+  epochs: 100
+  ema_decay: 0.9999
+
+discriminator:
+  learning_rate: 0.0001
+  b1: 0.0
+  b2: 0.99
+  target: discriminator.discriminator
+  params:
+    channel_multipliers: [1, 2, 4, 8]
+    base_channels: 64
+  disc_start: 5000
+
+lpips:
+  target: lpips.LPIPS
+  params:
+    channels: [64, 128, 256, 512, 512]
+
+wandb:
+  project: 'VQ-GAN'
+  name: 'celebA'
