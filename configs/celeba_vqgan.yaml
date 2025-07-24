@@ -31,8 +31,6 @@ discriminator:
 
 lpips:
   target: lpips.LPIPS
-  params:
-    channels: [64, 128, 256, 512, 512]
 
 wandb:
   project: 'VQ-GAN'

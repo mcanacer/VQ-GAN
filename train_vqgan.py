@@ -61,7 +61,7 @@ def make_generator_update_fn(*, vqgan_apply_fn, vqgan_optimizer, disc_apply_fn, 
             disc_fake = disc_apply_fn(disc_params, images_recon)
 
             recon_loss = jnp.mean(jnp.abs(images_recon - images))
-            perceptual_loss = 0.1 * lpips_apply_fn(lpips_params, images, images_recon)
+            perceptual_loss = 0.1 * lpips_apply_fn(lpips_params, images, images_recon).sum()
 
             g_loss = disc_factor * 0.1 * sigmoid_cross_entropy_with_logits(disc_fake, jnp.ones_like(disc_fake)).mean()
 
@@ -146,7 +146,7 @@ def main(config_path):
 
     disc = Discriminator(**disc_config['params'])
 
-    lpips = LPIPS(**lpips_config['params'])
+    lpips = LPIPS()
 
     vqgan_optimizer = optax.chain(
         optax.adam(
@@ -337,3 +337,4 @@ if __name__ == '__main__':
     if len(sys.argv) == 1:
         raise ValueError('you must provide config file')
     main(sys.argv[1])
+
